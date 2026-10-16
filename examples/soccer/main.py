@@ -27,6 +27,7 @@ REFEREE_CLASS_ID = 3
 
 STRIDE = 60
 KEYPOINT_CONFIDENCE_THRESHOLD = 0.5
+MIN_HOMOGRAPHY_POINTS = 4
 CONFIG = SoccerPitchConfiguration()
 
 COLORS = ['#FF1493', '#00BFFF', '#FF6347', '#FFD700']
@@ -100,6 +101,9 @@ def hide_low_confidence_keypoints(keypoints: sv.KeyPoints) -> sv.KeyPoints:
     Returns:
         sv.KeyPoints: The same keypoints with low-confidence positions set to (0, 0).
     """
+    # supervision leaves confidence unset when no pitch is detected in the frame.
+    if keypoints.keypoint_confidence is None:
+        return keypoints
     keypoints.xy[keypoints.keypoint_confidence < KEYPOINT_CONFIDENCE_THRESHOLD] = 0
     return keypoints
 
@@ -156,15 +160,38 @@ def render_radar(
     keypoints: sv.KeyPoints,
     color_lookup: np.ndarray
 ) -> np.ndarray:
+    """
+    Project detections onto a top-down pitch using the visible pitch keypoints.
+
+    Frames that do not show enough of the pitch to fit a homography (close-ups,
+    replays, or no pitch detected at all) get an empty pitch instead of raising.
+
+    Args:
+        detections (sv.Detections): Detections to project onto the pitch.
+        keypoints (sv.KeyPoints): Pitch keypoints, with hidden ones at (0, 0).
+        color_lookup (np.ndarray): Index into `COLORS` for each detection.
+
+    Returns:
+        np.ndarray: Image of the pitch with the projected detections.
+    """
+    radar = draw_pitch(config=CONFIG)
+    if len(keypoints.xy) == 0:
+        return radar
+
     mask = (keypoints.xy[0][:, 0] > 1) & (keypoints.xy[0][:, 1] > 1)
-    transformer = ViewTransformer(
-        source=keypoints.xy[0][mask].astype(np.float32),
-        target=np.array(CONFIG.vertices)[mask].astype(np.float32)
-    )
+    if np.count_nonzero(mask) < MIN_HOMOGRAPHY_POINTS:
+        return radar
+    try:
+        transformer = ViewTransformer(
+            source=keypoints.xy[0][mask].astype(np.float32),
+            target=np.array(CONFIG.vertices)[mask].astype(np.float32)
+        )
+    except ValueError:
+        # Degenerate keypoints, such as four on one pitch line, have no homography.
+        return radar
     xy = detections.get_anchors_coordinates(anchor=sv.Position.BOTTOM_CENTER)
     transformed_xy = transformer.transform_points(points=xy)
 
-    radar = draw_pitch(config=CONFIG)
     radar = draw_points_on_pitch(
         config=CONFIG, xy=transformed_xy[color_lookup == 0],
         face_color=sv.Color.from_hex(COLORS[0]), radius=20, pitch=radar)
