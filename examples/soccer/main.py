@@ -26,6 +26,7 @@ PLAYER_CLASS_ID = 2
 REFEREE_CLASS_ID = 3
 
 STRIDE = 60
+KEYPOINT_CONFIDENCE_THRESHOLD = 0.5
 CONFIG = SoccerPitchConfiguration()
 
 COLORS = ['#FF1493', '#00BFFF', '#FF6347', '#FFD700']
@@ -80,6 +81,27 @@ class Mode(Enum):
     PLAYER_TRACKING = 'PLAYER_TRACKING'
     TEAM_CLASSIFICATION = 'TEAM_CLASSIFICATION'
     RADAR = 'RADAR'
+
+
+def hide_low_confidence_keypoints(keypoints: sv.KeyPoints) -> sv.KeyPoints:
+    """
+    Move pitch keypoints the model is not confident about to (0, 0).
+
+    The pitch model predicts all 32 keypoints on every frame, including ones outside
+    the camera view, and places those at arbitrary positions with low confidence.
+    Older Ultralytics releases zeroed keypoints with confidence below 0.5, and the
+    rest of this script relies on that: `sv.VertexLabelAnnotator` skips (0, 0)
+    vertices and `render_radar` ignores them when fitting the homography. Newer
+    releases return the raw positions, so do the masking here explicitly.
+
+    Args:
+        keypoints (sv.KeyPoints): Keypoints detected by the pitch detection model.
+
+    Returns:
+        sv.KeyPoints: The same keypoints with low-confidence positions set to (0, 0).
+    """
+    keypoints.xy[keypoints.keypoint_confidence < KEYPOINT_CONFIDENCE_THRESHOLD] = 0
+    return keypoints
 
 
 def get_crops(frame: np.ndarray, detections: sv.Detections) -> List[np.ndarray]:
@@ -173,7 +195,8 @@ def run_pitch_detection(source_video_path: str, device: str) -> Iterator[np.ndar
     frame_generator = sv.get_video_frames_generator(source_path=source_video_path)
     for frame in frame_generator:
         result = pitch_detection_model(frame, verbose=False)[0]
-        keypoints = sv.KeyPoints.from_ultralytics(result)
+        keypoints = hide_low_confidence_keypoints(
+            sv.KeyPoints.from_ultralytics(result))
 
         annotated_frame = frame.copy()
         annotated_frame = VERTEX_LABEL_ANNOTATOR.annotate(
@@ -342,7 +365,8 @@ def run_radar(source_video_path: str, device: str) -> Iterator[np.ndarray]:
     tracker = sv.ByteTrack(minimum_consecutive_frames=3)
     for frame in frame_generator:
         result = pitch_detection_model(frame, verbose=False)[0]
-        keypoints = sv.KeyPoints.from_ultralytics(result)
+        keypoints = hide_low_confidence_keypoints(
+            sv.KeyPoints.from_ultralytics(result))
         result = player_detection_model(frame, imgsz=1280, verbose=False)[0]
         detections = sv.Detections.from_ultralytics(result)
         detections = tracker.update_with_detections(detections)
